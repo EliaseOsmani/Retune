@@ -9,9 +9,12 @@ import SwiftUI
 
 @main
 struct RetuneApp: App {
+    @StateObject private var playlistManager = PlaylistManager()
+    
     var body: some Scene {
         WindowGroup {
             ContentView()
+                .environmentObject(playlistManager)
         }
     }
 }
