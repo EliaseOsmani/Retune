@@ -2,12 +2,10 @@
 //  RetuneSwipeView.swift
 //  Retune
 //
-//  Created by Eliase Osmani on 2/17/26.
-//
 
 import SwiftUI
-import MusicKit
 import Combine
+import MusicKit
 
 @MainActor
 final class RetuneSessionVM: ObservableObject {
@@ -29,7 +27,6 @@ final class RetuneSessionVM: ObservableObject {
         do {
             let detailed = try await playlist.with([.tracks])
 
-            // tracks is optional in MusicKit → unwrap it
             guard let tracks = detailed.tracks else {
                 songs = []
                 return
@@ -41,7 +38,7 @@ final class RetuneSessionVM: ObservableObject {
                 Song(
                     title: $0.title,
                     artist: $0.artistName,
-                    artworkURL: $0.artwork?.url(width: 300, height: 300),
+                    artworkURL: $0.artwork?.url(width: 600, height: 600), // higher res for full-bleed
                     previewURL: $0.previewAssets?.first?.url,
                     musicItemID: $0.id.rawValue
                 )
@@ -66,15 +63,17 @@ struct RetuneSessionLoaderView: View {
             if vm.isLoading {
                 ProgressView("Loading songs…")
             } else if let msg = vm.errorMessage {
-                ContentUnavailableView("Couldn’t load songs",
-                                       systemImage: "xmark.circle",
-                                       description: Text(msg))
+                ContentUnavailableView(
+                    "Couldn't load songs",
+                    systemImage: "xmark.circle",
+                    description: Text(msg)
+                )
             } else {
-                // IMPORTANT: this name MUST match your actual swipe screen
                 RetuneSwipeView(songs: vm.songs)
             }
         }
-        .navigationTitle("Retune")
+        .navigationTitle(vm.playlist.name)
+        .navigationBarTitleDisplayMode(.inline)
         .task { await vm.loadSongs() }
     }
 }
