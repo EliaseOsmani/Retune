@@ -4,6 +4,7 @@
 //
 
 import SwiftUI
+import SwiftData
 
 @main
 struct RetuneApp: App {
@@ -11,5 +12,6 @@ struct RetuneApp: App {
         WindowGroup {
             RootView()
         }
+        .modelContainer(for: SessionRecord.self)
     }
 }

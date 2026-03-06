@@ -4,8 +4,8 @@
 //
 
 import SwiftUI
-import Combine
 import MusicKit
+import Combine
 
 @MainActor
 final class RetuneSessionVM: ObservableObject {
@@ -69,7 +69,7 @@ struct RetuneSessionLoaderView: View {
                     description: Text(msg)
                 )
             } else {
-                RetuneSwipeView(songs: vm.songs)
+                RetuneSwipeView(songs: vm.songs, playlistID: vm.playlist.id.rawValue, playlistName: vm.playlist.name, orderMode: SessionOrderMode.inOrder.rawValue)
             }
         }
         .navigationTitle(vm.playlist.name)
