@@ -27,7 +27,7 @@ final class AudioPreviewPlayer: ObservableObject {
         
         //Blend audios together smoothly
         do {
-            try AVAudioSession.sharedInstance().setCategory(.ambient, mode: .default)
+            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
             try AVAudioSession.sharedInstance().setActive(true)
         } catch {
             //if Audio session fails, we can still try playing audio
