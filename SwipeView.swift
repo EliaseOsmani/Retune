@@ -74,7 +74,7 @@ struct RetuneSwipeView: View {
         }
         .navigationBarTitleDisplayMode(.inline)
         .navigationDestination(isPresented: $goToSave) {
-            SaveRetunedPlaylistView(keptSongs: keptSongs, removedSongs: removedSongs)
+            SaveRetunedPlaylistView(keptSongs: keptSongs, removedSongs: removedSongs, platform: playlistID.hasPrefix("spotify:") ? "spotify" : "appleMusic")
         }
         .onAppear { restoreOrCreateSession() }
     }

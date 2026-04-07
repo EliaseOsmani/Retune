@@ -16,7 +16,7 @@ enum SaveState: Equatable {
     case creatingPlaylist
     case addingTracks(current: Int, total: Int)
     case success(playlistName: String)
-    case noSubscription          // PDR: Key Tradeoff — graceful degradation
+    case noSubscription
     case failed(String)
 }
 
@@ -33,14 +33,13 @@ final class SavePlaylistVM: ObservableObject {
         }
     }
 
-    func savePlaylist(name: String, keptSongs: [Song]) async {
+    func saveToAppleMusic(name: String, keptSongs: [Song]) async {
         guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         guard !keptSongs.isEmpty else {
             saveState = .failed("No songs to save — keep at least one song before saving.")
             return
         }
 
-        // ── Step 1: Verify Apple Music authorization ─────────────────────
         saveState = .checkingSubscription
         let status = await MusicAuthorization.request()
         guard status == .authorized else {
@@ -48,29 +47,23 @@ final class SavePlaylistVM: ObservableObject {
             return
         }
 
-        // ── Step 2: Look up each song in the catalog by MusicItemID ──────
-        // We need live MusicKit.Song objects to pass to MusicLibrary.
-        // Our Song model stores musicItemID strings from when songs were fetched.
         saveState = .lookingUpTracks
         let songIDs = keptSongs.compactMap { $0.musicItemID }.map { MusicItemID($0) }
-
         guard !songIDs.isEmpty else {
-            saveState = .failed("None of the kept songs have Apple Music IDs. This shouldn't happen — please try again.")
+            saveState = .failed("None of the kept songs have Apple Music IDs.")
             return
         }
 
         var catalogSongs: [MusicKit.Song] = []
         do {
-            // Fetch in batches of 25 to avoid hitting request size limits
             let batchSize = 25
             for batchStart in stride(from: 0, to: songIDs.count, by: batchSize) {
-                let batchEnd   = min(batchStart + batchSize, songIDs.count)
-                let batchIDs   = Array(songIDs[batchStart..<batchEnd])
-                var request    = MusicCatalogResourceRequest<MusicKit.Song>(matching: \.id, memberOf: batchIDs)
-                request.limit  = batchSize
-                let response   = try await request.response()
-                // Preserve original order
-                let ordered = batchIDs.compactMap { id in response.items.first(where: { $0.id == id }) }
+                let batchEnd  = min(batchStart + batchSize, songIDs.count)
+                let batchIDs  = Array(songIDs[batchStart..<batchEnd])
+                var request   = MusicCatalogResourceRequest<MusicKit.Song>(matching: \.id, memberOf: batchIDs)
+                request.limit = batchSize
+                let response  = try await request.response()
+                let ordered   = batchIDs.compactMap { id in response.items.first(where: { $0.id == id }) }
                 catalogSongs.append(contentsOf: ordered)
             }
         } catch {
@@ -83,7 +76,6 @@ final class SavePlaylistVM: ObservableObject {
             return
         }
 
-        // ── Step 3: Create the new playlist ──────────────────────────────
         saveState = .creatingPlaylist
         let newPlaylist: Playlist
         do {
@@ -97,7 +89,6 @@ final class SavePlaylistVM: ObservableObject {
             return
         }
 
-        // ── Step 4: Add songs one by one (MusicKit has no bulk-add API) ──
         var addedCount = 0
         for (index, song) in catalogSongs.enumerated() {
             saveState = .addingTracks(current: index + 1, total: catalogSongs.count)
@@ -105,7 +96,6 @@ final class SavePlaylistVM: ObservableObject {
                 try await MusicLibrary.shared.add(song, to: newPlaylist)
                 addedCount += 1
             } catch {
-                // Non-fatal: log and continue — don't abort the whole save for one bad track
                 print("[Retune] Couldn't add \(song.title): \(error.localizedDescription)")
             }
         }
@@ -117,12 +107,25 @@ final class SavePlaylistVM: ObservableObject {
         }
     }
 
-    // MARK: - Error handling
+    func saveToSpotify(name: String, keptSongs: [Song]) async {
+        guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        guard !keptSongs.isEmpty else {
+            saveState = .failed("No songs to save — keep at least one song before saving.")
+            return
+        }
+
+        saveState = .creatingPlaylist
+        do {
+            saveState = .addingTracks(current: 0, total: keptSongs.count)
+            let _ = try await SpotifyAPIClient.shared.savePlaylist(name: name, keptSongs: keptSongs)
+            saveState = .success(playlistName: name)
+        } catch {
+            saveState = .failed(error.localizedDescription)
+        }
+    }
 
     private func handleMusicKitError(_ error: Error, fallback: String) -> SaveState {
         let nsError = error as NSError
-        // MPErrorDomain Code=5 = "The requested action is not supported"
-        // This is what Apple Music throws when user has no active subscription.
         if nsError.domain == "MPErrorDomain" && nsError.code == 5 {
             return .noSubscription
         }
@@ -133,8 +136,9 @@ final class SavePlaylistVM: ObservableObject {
 // MARK: - SaveRetunedPlaylistView
 
 struct SaveRetunedPlaylistView: View {
-    let keptSongs:   [Song]
+    let keptSongs:    [Song]
     let removedSongs: [Song]
+    let platform:     String
 
     @StateObject private var vm = SavePlaylistVM()
     @State private var newName = ""
@@ -142,8 +146,6 @@ struct SaveRetunedPlaylistView: View {
 
     var body: some View {
         Form {
-
-            // ── Summary ─────────────────────────────────────────────────
             Section("Session Summary") {
                 HStack {
                     Label("\(keptSongs.count) kept", systemImage: "checkmark.circle.fill")
@@ -154,7 +156,6 @@ struct SaveRetunedPlaylistView: View {
                 }
             }
 
-            // ── Playlist name ────────────────────────────────────────────
             if !isFinalState {
                 Section("New Playlist Name") {
                     TextField("My Retuned Playlist", text: $newName)
@@ -162,12 +163,17 @@ struct SaveRetunedPlaylistView: View {
                 }
             }
 
-            // ── Action / Progress ────────────────────────────────────────
             Section {
                 switch vm.saveState {
                 case .idle:
-                    Button("Save to Apple Music") {
-                        Task { await vm.savePlaylist(name: newName, keptSongs: keptSongs) }
+                    Button("Save to \(platform == "spotify" ? "Spotify" : "Apple Music")") {
+                        Task {
+                            if platform == "spotify" {
+                                await vm.saveToSpotify(name: newName, keptSongs: keptSongs)
+                            } else {
+                                await vm.saveToAppleMusic(name: newName, keptSongs: keptSongs)
+                            }
+                        }
                     }
                     .disabled(newName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
 
@@ -193,7 +199,7 @@ struct SaveRetunedPlaylistView: View {
                             .foregroundStyle(.green)
                             .font(.title3)
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("Saved to Apple Music!")
+                            Text("Saved!")
                                 .font(.body.weight(.medium))
                             Text("\"\(name)\" · \(keptSongs.count) songs")
                                 .font(.caption)
@@ -213,16 +219,13 @@ struct SaveRetunedPlaylistView: View {
                         Text(msg)
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                        Button("Try Again") {
-                            vm.saveState = .idle
-                        }
-                        .font(.caption)
+                        Button("Try Again") { vm.saveState = .idle }
+                            .font(.caption)
                     }
                     .padding(.vertical, 4)
                 }
             }
 
-            // ── Discard ──────────────────────────────────────────────────
             if !vm.isWorking {
                 Section {
                     Button("Discard", role: .destructive) { dismiss() }
@@ -237,8 +240,6 @@ struct SaveRetunedPlaylistView: View {
             }
         }
     }
-
-    // MARK: - Helpers
 
     private var isFinalState: Bool {
         switch vm.saveState {
@@ -261,11 +262,9 @@ struct SaveRetunedPlaylistView: View {
             Label("Apple Music Required", systemImage: "music.note")
                 .font(.body.weight(.medium))
                 .foregroundStyle(.orange)
-
-            Text("Saving playlists to Apple Music requires an active Apple Music subscription. You can still use Retune to review and curate playlists — just connect an Apple Music account to save results.")
+            Text("Saving playlists requires an active Apple Music subscription.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-
             Link("Learn about Apple Music", destination: URL(string: "https://www.apple.com/apple-music/")!)
                 .font(.caption)
         }
