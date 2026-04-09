@@ -71,41 +71,78 @@ struct HomeView: View {
     @State private var selected: PlaylistSelection?
 
     @Query private var savedSessions: [SessionRecord]
-    @State private var resumeSongs:   [Song]?         = nil
-    @State private var resumeSession: SessionRecord?  = nil
+    @State private var resumeSongs:   [Song]?        = nil
+    @State private var resumeSession: SessionRecord? = nil
     @State private var showResume = false
 
     var body: some View {
-        Group {
-            if isLoading {
-                loadingView
-            } else if let msg = errorMessage {
-                ContentUnavailableView(
-                    "Couldn't load playlists",
-                    systemImage: "exclamationmark.triangle",
-                    description: Text(msg)
-                )
-            } else if currentPlaylists.isEmpty {
-                ContentUnavailableView(
-                    "No Playlists Found",
-                    systemImage: "music.note.list",
-                    description: Text("Add playlists to your \(selectedPlatform.rawValue) library to get started.")
-                )
-            } else {
-                playlistList
+        VStack(spacing: 0) {
+            // Platform picker always visible regardless of auth/load state
+            Picker("Platform", selection: $selectedPlatform) {
+                ForEach(MusicPlatform.allCases, id: \.self) { platform in
+                    Text(platform.rawValue).tag(platform)
+                }
             }
+            .pickerStyle(.segmented)
+            .padding(.horizontal, 20)
+            .padding(.vertical, 12)
+            .background(Color(.systemGroupedBackground))
+
+            Group {
+                if selectedPlatform == .spotify && !spotifyAuth.isAuthenticated {
+                    spotifyLoginScreen
+                } else if isLoading {
+                    loadingView
+                } else if let msg = errorMessage {
+                    ContentUnavailableView(
+                        "Couldn't load playlists",
+                        systemImage: "exclamationmark.triangle",
+                        description: Text(msg)
+                    )
+                } else if currentPlaylists.isEmpty {
+                    ContentUnavailableView(
+                        "No Playlists Found",
+                        systemImage: "music.note.list",
+                        description: Text("Add playlists to your \(selectedPlatform.rawValue) library to get started.")
+                    )
+                } else {
+                    playlistList
+                }
+                    
+            }
+            .onAppear {
+                SpotifyAuthManager.shared.logout()  // temporary — remove after one run
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+        .background(Color(.systemGroupedBackground))
         .navigationTitle("Retune")
         .navigationBarTitleDisplayMode(.large)
         .task { await loadCurrentPlatform() }
         .onChange(of: selectedPlatform) {
             Task { await loadCurrentPlatform() }
         }
+        .onChange(of: spotifyAuth.isAuthenticated) { _, isAuthed in
+            if isAuthed {
+                Task { await spotifyVM.load() }
+            }
+        }
         .navigationDestination(item: $selected) { selection in
             if selection.isSpotify {
                 SpotifySessionSetupView(playlist: selection.spotifyPlaylist!)
             } else {
                 SessionSetupView(playlist: selection.appleMusicPlaylist!)
+            }
+        }
+        .toolbar {
+            if selectedPlatform == .spotify && spotifyAuth.isAuthenticated {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Sign Out") {
+                        spotifyAuth.logout()
+                        spotifyVM.reset()
+                    }
+                    .foregroundStyle(.red)
+                }
             }
         }
     }
@@ -123,13 +160,9 @@ struct HomeView: View {
     private var currentPlaylists: [PlaylistSelection] {
         switch selectedPlatform {
         case .appleMusic:
-            return appleMusicVM.playlists.map {
-                PlaylistSelection(appleMusicPlaylist: $0)
-            }
+            return appleMusicVM.playlists.map { PlaylistSelection(appleMusicPlaylist: $0) }
         case .spotify:
-            return spotifyVM.playlists.map {
-                PlaylistSelection(spotifyPlaylist: $0)
-            }
+            return spotifyVM.playlists.map { PlaylistSelection(spotifyPlaylist: $0) }
         }
     }
 
@@ -144,6 +177,27 @@ struct HomeView: View {
         }
     }
 
+    // MARK: - Spotify Login Screen
+
+    private var spotifyLoginScreen: some View {
+        ScrollView {
+            VStack(spacing: 0) {
+                resumeBanner
+                    .padding(.horizontal, 16)
+                    .padding(.top, 8)
+
+                headerBanner
+                    .padding(.horizontal, 16)
+                    .padding(.top, 8)
+                    .padding(.bottom, 20)
+
+                spotifyLoginBanner
+                    .padding(.horizontal, 16)
+            }
+            .padding(.bottom, 24)
+        }
+    }
+
     // MARK: - Playlist List
 
     private var playlistList: some View {
@@ -155,42 +209,24 @@ struct HomeView: View {
                     .padding(.top, 8)
                     .padding(.bottom, 20)
 
-                // Platform picker
-                Picker("Platform", selection: $selectedPlatform) {
-                    ForEach(MusicPlatform.allCases, id: \.self) { platform in
-                        Text(platform.rawValue).tag(platform)
-                    }
+                HStack {
+                    Text("Your Playlists")
+                        .font(.headline)
+                        .foregroundStyle(.primary)
+                    Spacer()
+                    Text("\(currentPlaylists.count)")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
                 }
-                .pickerStyle(.segmented)
                 .padding(.horizontal, 20)
-                .padding(.bottom, 16)
+                .padding(.bottom, 10)
 
-                // Spotify login prompt
-                if selectedPlatform == .spotify && !spotifyAuth.isAuthenticated {
-                    spotifyLoginBanner
-                        .padding(.horizontal, 16)
-                        .padding(.bottom, 16)
-                } else {
-                    // Section label
-                    HStack {
-                        Text("Your Playlists")
-                            .font(.headline)
-                            .foregroundStyle(.primary)
-                        Spacer()
-                        Text("\(currentPlaylists.count)")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
+                ForEach(currentPlaylists) { selection in
+                    UnifiedPlaylistRow(selection: selection) {
+                        selected = selection
                     }
-                    .padding(.horizontal, 20)
-                    .padding(.bottom, 10)
-
-                    ForEach(currentPlaylists) { selection in
-                        UnifiedPlaylistRow(selection: selection) {
-                            selected = selection
-                        }
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 4)
-                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 4)
                 }
             }
             .padding(.bottom, 24)
@@ -216,7 +252,6 @@ struct HomeView: View {
 
             Button {
                 spotifyAuth.login()
-                Task { await spotifyVM.load() }
             } label: {
                 Text("Connect Spotify")
                     .font(.headline)
@@ -225,6 +260,16 @@ struct HomeView: View {
                     .background(Color.green)
                     .foregroundStyle(.white)
                     .clipShape(RoundedRectangle(cornerRadius: 14))
+            }
+            .disabled(spotifyAuth.isAuthenticating)
+
+            if spotifyAuth.isAuthenticating {
+                HStack(spacing: 8) {
+                    ProgressView().scaleEffect(0.85)
+                    Text("Connecting…")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
             }
 
             if let error = spotifyAuth.errorMessage {
@@ -307,6 +352,8 @@ struct HomeView: View {
                 )
             }
             .buttonStyle(.plain)
+            .padding(.horizontal, 16)
+            .padding(.top, 8)
             .navigationDestination(isPresented: $showResume) {
                 if let songs = resumeSongs, let session = resumeSession {
                     RetuneSwipeView(

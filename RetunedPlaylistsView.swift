@@ -9,14 +9,6 @@ import SwiftUI
 import MusicKit
 import Combine
 
-private struct PlaylistSelection: Identifiable, Hashable {
-    let id: MusicItemID
-    let playlist: Playlist
-    
-    static func == (lhs: PlaylistSelection, rhs: PlaylistSelection) -> Bool { lhs.id == rhs.id }
-    func hash(into haser: inout Hasher) { haser.combine(id) }
-}
-
 struct RetunePlaylistsView: View {
     @StateObject private var vm = MusicPlaylistsVM()
     @State private var selected: PlaylistSelection?
@@ -32,7 +24,7 @@ struct RetunePlaylistsView: View {
             } else {
                 List(vm.playlists, id: \.id) { playlist in
                     Button {
-                        selected = PlaylistSelection(id: playlist.id, playlist: playlist)
+                        selected = PlaylistSelection(appleMusicPlaylist: playlist)
                     } label: {
                         Text(playlist.name)
                     }
@@ -42,7 +34,14 @@ struct RetunePlaylistsView: View {
         .navigationTitle("Choose a Playlist")
         .task { await vm.load() }
         .navigationDestination(item: $selected) { selection in
-            RetuneSessionLoaderView(playlist: selection.playlist)
+            if let playlist = selection.appleMusicPlaylist {
+                RetuneSessionLoaderView(playlist: playlist)
+            } else {
+                ContentUnavailableView(
+                    "Playlist unavailable",
+                    systemImage: "music.note.list"
+                )
+            }
         }
     }
 }

@@ -12,6 +12,7 @@ final class RetuneSessionVM: ObservableObject {
     @Published var songs: [Song] = []
     @Published var isLoading = false
     @Published var errorMessage: String?
+    @State private var selected: PlaylistSelection?
 
     let playlist: Playlist
 

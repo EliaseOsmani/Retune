@@ -15,7 +15,7 @@ final class SpotifyPlaylistsVM: ObservableObject {
     @Published var errorMessage: String?
 
     func load() async {
-        isLoading   = true
+        isLoading    = true
         errorMessage = nil
         defer { isLoading = false }
 
@@ -24,5 +24,11 @@ final class SpotifyPlaylistsVM: ObservableObject {
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+
+    func reset() {
+        playlists    = []
+        errorMessage = nil
+        isLoading    = false
     }
 }

@@ -35,13 +35,25 @@ final class SpotifyAPIClient {
     // MARK: - Fetch playlists
 
     func fetchPlaylists() async throws -> [SpotifyPlaylist] {
+        // Temporary — find out which account we're authenticated as
+        let meRequest = try await authorizedRequest(for: "\(base)/me")
+        let (meData, _) = try await URLSession.shared.data(for: meRequest)
+        print("🎵 Spotify me response:", String(data: meData, encoding: .utf8) ?? "unreadable")
+
         var playlists: [SpotifyPlaylist] = []
         var nextURL: String? = "\(base)/me/playlists?limit=50"
 
         while let urlString = nextURL {
-            let request  = try await authorizedRequest(for: urlString)
+            let request   = try await authorizedRequest(for: urlString)
             let (data, _) = try await URLSession.shared.data(for: request)
+
+            print("🎵 Spotify playlists response:", String(data: data, encoding: .utf8) ?? "unreadable")
+
             let response = try JSONDecoder().decode(SpotifyPagingResponse<SpotifyPlaylist>.self, from: data)
+
+            print("🎵 Playlist count:", response.items.count)
+            print("🎵 First few:", response.items.prefix(3).map(\.name))
+
             playlists.append(contentsOf: response.items)
             nextURL = response.next
         }
@@ -53,8 +65,7 @@ final class SpotifyAPIClient {
 
     func fetchTracks(playlistID: String) async throws -> [Song] {
         var songs: [Song] = []
-        var nextURL: String? = "\(base)/playlists/\(playlistID)/tracks?limit=100&fields=next,items(track(id,name,artists,album,preview_url,duration_ms))"
-
+        var nextURL: String? = "\(base)/users/5p5v75aiq275hj8i4tcldu4pe/playlists?limit=50"
         while let urlString = nextURL {
             let request   = try await authorizedRequest(for: urlString)
             let (data, _) = try await URLSession.shared.data(for: request)

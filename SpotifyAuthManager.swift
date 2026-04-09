@@ -45,7 +45,7 @@ final class SpotifyAuthManager: NSObject, ObservableObject {
             .init(name: "response_type",  value: "code"),
             .init(name: "redirect_uri",   value: redirectURI),
             .init(name: "scope",          value: scopes),
-            .init(name: "show_dialog",    value: "false")
+            .init(name: "show_dialog",    value: "true")
         ]
 
         guard let url = components.url else { return }
@@ -59,7 +59,7 @@ final class SpotifyAuthManager: NSObject, ObservableObject {
             }
         }
         authSession?.presentationContextProvider = self
-        authSession?.prefersEphemeralWebBrowserSession = false
+        authSession?.prefersEphemeralWebBrowserSession = true
         authSession?.start()
     }
 
@@ -97,10 +97,11 @@ final class SpotifyAuthManager: NSObject, ObservableObject {
 
     private func exchangeCodeForToken(code: String) async {
         guard let request = tokenRequest(body: [
-            "grant_type":   "authorization_code",
-            "code":         code,
-            "redirect_uri": redirectURI,
-            "client_id":    clientID
+            "grant_type":    "authorization_code",
+            "code":          code,
+            "redirect_uri":  redirectURI,
+            "client_id":     clientID,
+            "client_secret": Secrets.spotifyClientSecret  // add this
         ]) else { return }
 
         await performTokenRequest(request)
@@ -115,7 +116,8 @@ final class SpotifyAuthManager: NSObject, ObservableObject {
         guard let request = tokenRequest(body: [
             "grant_type":    "refresh_token",
             "refresh_token": refresh,
-            "client_id":     clientID
+            "client_id":     clientID,
+            "client_secret": Secrets.spotifyClientSecret  // add this line
         ]) else { return }
 
         await performTokenRequest(request)
@@ -136,7 +138,11 @@ final class SpotifyAuthManager: NSObject, ObservableObject {
     private func performTokenRequest(_ request: URLRequest) async {
         do {
             let (data, _) = try await URLSession.shared.data(for: request)
-            let response  = try JSONDecoder().decode(SpotifyTokenResponse.self, from: data)
+
+            // Temporary debug — remove before release
+            print("🎵 Spotify token response:", String(data: data, encoding: .utf8) ?? "unreadable")
+
+            let response = try JSONDecoder().decode(SpotifyTokenResponse.self, from: data)
 
             saveToken(response.access_token, key: tokenKey)
             if let refresh = response.refresh_token {
@@ -212,10 +218,14 @@ final class SpotifyAuthManager: NSObject, ObservableObject {
 
 extension SpotifyAuthManager: ASWebAuthenticationPresentationContextProviding {
     nonisolated func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
-        UIApplication.shared.connectedScenes
-            .compactMap { $0 as? UIWindowScene }
-            .flatMap { $0.windows }
-            .first { $0.isKeyWindow } ?? ASPresentationAnchor()
+        // Hop to the main actor synchronously to access UI properties
+        MainActor.assumeIsolated {
+            UIApplication.shared.connectedScenes
+                .compactMap { $0 as? UIWindowScene }
+                .first { !$0.windows.isEmpty }
+                .flatMap { scene in scene.windows.first { $0.isKeyWindow } }
+                ?? UIWindow()
+        }
     }
 }
 
