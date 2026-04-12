@@ -2,7 +2,10 @@
 //  SpotifyAuthManager.swift
 //  Retune
 //
-//  Created by Eliase Osmani on 4/6/26.
+//  NOTE: Spotify track access is restricted in Development Mode due to
+//  Spotify's quota policies (post-November 2024). Auth and playlist listing
+//  work correctly. Track fetching will work once Extended Quota Mode is
+//  granted (requires a registered business entity).
 //
 
 import Foundation
@@ -14,23 +17,25 @@ final class SpotifyAuthManager: NSObject, ObservableObject {
 
     static let shared = SpotifyAuthManager()
 
-    @Published var isAuthenticated = false
+    @Published var isAuthenticated  = false
     @Published var isAuthenticating = false
     @Published var errorMessage: String?
 
-    private let clientID     = Secrets.spotifyClientID
-    private let redirectURI  = Secrets.spotifyRedirectURI
-    private let scopes       = "playlist-read-private playlist-read-collaborative playlist-modify-public playlist-modify-private"
+    private let clientID    = Secrets.spotifyClientID
+    private let redirectURI = Secrets.spotifyRedirectURI
+    private let scopes      = "playlist-read-private playlist-read-collaborative playlist-modify-public playlist-modify-private"
 
-    private let tokenKey        = "spotify_access_token"
-    private let refreshKey      = "spotify_refresh_token"
-    private let expiryKey       = "spotify_token_expiry"
+    private let tokenKey   = "spotify_access_token"
+    private let refreshKey = "spotify_refresh_token"
+    private let expiryKey  = "spotify_token_expiry"
 
+    private var isRefreshing = false
     private var authSession: ASWebAuthenticationSession?
 
     private override init() {
         super.init()
-        isAuthenticated = storedAccessToken != nil && !isTokenExpired
+        // Consider authenticated if a token exists — expiry handled lazily
+        isAuthenticated = storedAccessToken != nil
     }
 
     // MARK: - Login
@@ -41,11 +46,11 @@ final class SpotifyAuthManager: NSObject, ObservableObject {
 
         var components = URLComponents(string: "https://accounts.spotify.com/authorize")!
         components.queryItems = [
-            .init(name: "client_id",      value: clientID),
-            .init(name: "response_type",  value: "code"),
-            .init(name: "redirect_uri",   value: redirectURI),
-            .init(name: "scope",          value: scopes),
-            .init(name: "show_dialog",    value: "true")
+            .init(name: "client_id",     value: clientID),
+            .init(name: "response_type", value: "code"),
+            .init(name: "redirect_uri",  value: redirectURI),
+            .init(name: "scope",         value: scopes),
+            .init(name: "show_dialog",   value: "false")
         ]
 
         guard let url = components.url else { return }
@@ -59,7 +64,8 @@ final class SpotifyAuthManager: NSObject, ObservableObject {
             }
         }
         authSession?.presentationContextProvider = self
-        authSession?.prefersEphemeralWebBrowserSession = true
+        // false = browser persists cookies so Spotify remembers the user
+        authSession?.prefersEphemeralWebBrowserSession = false
         authSession?.start()
     }
 
@@ -70,14 +76,14 @@ final class SpotifyAuthManager: NSObject, ObservableObject {
         isAuthenticated = false
     }
 
-    // MARK: - Callback handling
+    // MARK: - Callback
 
     private func handleCallback(url: URL?, error: Error?) async {
         isAuthenticating = false
 
         if let error {
             if (error as NSError).code != ASWebAuthenticationSessionError.canceledLogin.rawValue {
-                errorMessage = error.localizedDescription
+                errorMessage = "Couldn't connect to Spotify. Please try again."
             }
             return
         }
@@ -101,26 +107,29 @@ final class SpotifyAuthManager: NSObject, ObservableObject {
             "code":          code,
             "redirect_uri":  redirectURI,
             "client_id":     clientID,
-            "client_secret": Secrets.spotifyClientSecret  // add this
+            "client_secret": Secrets.spotifyClientSecret
         ]) else { return }
-
-        await performTokenRequest(request)
+        await performTokenRequest(request, isRefresh: false)
     }
 
+    // MARK: - Token refresh
+
     func refreshAccessToken() async {
+        guard !isRefreshing else { return }
         guard let refresh = storedRefreshToken else {
             isAuthenticated = false
             return
         }
+        isRefreshing = true
+        defer { isRefreshing = false }
 
         guard let request = tokenRequest(body: [
             "grant_type":    "refresh_token",
             "refresh_token": refresh,
             "client_id":     clientID,
-            "client_secret": Secrets.spotifyClientSecret  // add this line
+            "client_secret": Secrets.spotifyClientSecret
         ]) else { return }
-
-        await performTokenRequest(request)
+        await performTokenRequest(request, isRefresh: true)
     }
 
     private func tokenRequest(body: [String: String]) -> URLRequest? {
@@ -135,34 +144,38 @@ final class SpotifyAuthManager: NSObject, ObservableObject {
         return request
     }
 
-    private func performTokenRequest(_ request: URLRequest) async {
+    private func performTokenRequest(_ request: URLRequest, isRefresh: Bool) async {
         do {
-            let (data, _) = try await URLSession.shared.data(for: request)
+            let (data, response) = try await URLSession.shared.data(for: request)
 
-            // Temporary debug — remove before release
-            print("🎵 Spotify token response:", String(data: data, encoding: .utf8) ?? "unreadable")
-
-            let response = try JSONDecoder().decode(SpotifyTokenResponse.self, from: data)
-
-            saveToken(response.access_token, key: tokenKey)
-            if let refresh = response.refresh_token {
-                saveToken(refresh, key: refreshKey)
+            if let http = response as? HTTPURLResponse, http.statusCode != 200 {
+                if !isRefresh {
+                    errorMessage = "Couldn't sign in to Spotify. Please try again."
+                    isAuthenticated = false
+                }
+                return
             }
-            let expiry = Date().addingTimeInterval(TimeInterval(response.expires_in - 60))
+
+            let tokenResponse = try JSONDecoder().decode(SpotifyTokenResponse.self, from: data)
+            saveToken(tokenResponse.access_token, key: tokenKey)
+            if let newRefresh = tokenResponse.refresh_token {
+                saveToken(newRefresh, key: refreshKey)
+            }
+            let expiry = Date().addingTimeInterval(TimeInterval(tokenResponse.expires_in - 60))
             UserDefaults.standard.set(expiry, forKey: expiryKey)
             isAuthenticated = true
+            errorMessage = nil
+
         } catch {
-            errorMessage = "Couldn't get Spotify token: \(error.localizedDescription)"
-            isAuthenticated = false
+            // On refresh failure, leave session intact — token may still work
+            if !isRefresh {
+                errorMessage = "Couldn't sign in to Spotify. Please try again."
+                isAuthenticated = false
+            }
         }
     }
 
     // MARK: - Token accessors
-
-    var accessToken: String? {
-        guard !isTokenExpired else { return nil }
-        return storedAccessToken
-    }
 
     var validAccessToken: String? {
         get async {
@@ -171,8 +184,10 @@ final class SpotifyAuthManager: NSObject, ObservableObject {
         }
     }
 
-    private var isTokenExpired: Bool {
-        guard let expiry = UserDefaults.standard.object(forKey: expiryKey) as? Date else { return true }
+    var isTokenExpired: Bool {
+        guard let expiry = UserDefaults.standard.object(forKey: expiryKey) as? Date else {
+            return true
+        }
         return Date() >= expiry
     }
 
@@ -194,10 +209,10 @@ final class SpotifyAuthManager: NSObject, ObservableObject {
 
     private func retrieveToken(key: String) -> String? {
         let query: [CFString: Any] = [
-            kSecClass:            kSecClassGenericPassword,
-            kSecAttrAccount:      key,
-            kSecReturnData:       true,
-            kSecMatchLimit:       kSecMatchLimitOne
+            kSecClass:       kSecClassGenericPassword,
+            kSecAttrAccount: key,
+            kSecReturnData:  true,
+            kSecMatchLimit:  kSecMatchLimitOne
         ]
         var result: AnyObject?
         SecItemCopyMatching(query as CFDictionary, &result)
@@ -218,12 +233,11 @@ final class SpotifyAuthManager: NSObject, ObservableObject {
 
 extension SpotifyAuthManager: ASWebAuthenticationPresentationContextProviding {
     nonisolated func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
-        // Hop to the main actor synchronously to access UI properties
         MainActor.assumeIsolated {
             UIApplication.shared.connectedScenes
                 .compactMap { $0 as? UIWindowScene }
                 .first { !$0.windows.isEmpty }
-                .flatMap { scene in scene.windows.first { $0.isKeyWindow } }
+                .flatMap { $0.windows.first { $0.isKeyWindow } }
                 ?? UIWindow()
         }
     }

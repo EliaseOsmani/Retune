@@ -11,27 +11,21 @@ import SwiftData
 // MARK: - Root (Tab Bar)
 
 struct RootView: View {
+    @EnvironmentObject private var appState: AppStateManager
+
     var body: some View {
         TabView {
             HomeTab()
-                .tabItem {
-                    Label("Home", systemImage: "house.fill")
-                }
+                .tabItem { Label("Home", systemImage: "house.fill") }
 
             ComingSoonView(title: "Feed", icon: "music.note.list")
-                .tabItem {
-                    Label("Feed", systemImage: "music.note.list")
-                }
+                .tabItem { Label("Feed", systemImage: "music.note.list") }
 
             ComingSoonView(title: "Notifications", icon: "bell.fill")
-                .tabItem {
-                    Label("Notifications", systemImage: "bell.fill")
-                }
+                .tabItem { Label("Notifications", systemImage: "bell.fill") }
 
-            ComingSoonView(title: "Profile", icon: "person.fill")
-                .tabItem {
-                    Label("Profile", systemImage: "person.fill")
-                }
+            ProfileTab()
+                .tabItem { Label("Profile", systemImage: "person.fill") }
         }
     }
 }
@@ -46,7 +40,17 @@ struct HomeTab: View {
     }
 }
 
-// MARK: - Platform
+// MARK: - Profile Tab
+
+struct ProfileTab: View {
+    var body: some View {
+        NavigationStack {
+            ProfileView()
+        }
+    }
+}
+
+// MARK: - Platform enum
 
 enum MusicPlatform: String, CaseIterable {
     case appleMusic = "Apple Music"
@@ -63,11 +67,12 @@ enum MusicPlatform: String, CaseIterable {
 // MARK: - Home View
 
 struct HomeView: View {
+    @EnvironmentObject private var appState: AppStateManager
+
     @StateObject private var appleMusicVM = MusicPlaylistsVM()
     @StateObject private var spotifyVM    = SpotifyPlaylistsVM()
     @StateObject private var spotifyAuth  = SpotifyAuthManager.shared
 
-    @State private var selectedPlatform: MusicPlatform = .appleMusic
     @State private var selected: PlaylistSelection?
 
     @Query private var savedSessions: [SessionRecord]
@@ -75,23 +80,36 @@ struct HomeView: View {
     @State private var resumeSession: SessionRecord? = nil
     @State private var showResume = false
 
+    // The service currently being shown — reads activeService when both connected,
+    // otherwise derived directly from connectedService.
+    private var activePlatform: MusicPlatform {
+        switch appState.connectedService {
+        case .appleMusic: return .appleMusic
+        case .spotify:    return .spotify
+        case .both:       return appState.activeService
+        case .none:       return .appleMusic
+        }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
-            // Platform picker always visible regardless of auth/load state
-            Picker("Platform", selection: $selectedPlatform) {
-                ForEach(MusicPlatform.allCases, id: \.self) { platform in
-                    Text(platform.rawValue).tag(platform)
+
+            // ── Platform picker — only visible when both services connected ──
+            if appState.connectedService == .both {
+                Picker("Platform", selection: $appState.activeService) {
+                    ForEach(MusicPlatform.allCases, id: \.self) { platform in
+                        Text(platform.rawValue).tag(platform)
+                    }
                 }
+                .pickerStyle(.segmented)
+                .padding(.horizontal, 20)
+                .padding(.vertical, 12)
+                .background(Color(.systemGroupedBackground))
+                .transition(.move(edge: .top).combined(with: .opacity))
             }
-            .pickerStyle(.segmented)
-            .padding(.horizontal, 20)
-            .padding(.vertical, 12)
-            .background(Color(.systemGroupedBackground))
 
             Group {
-                if selectedPlatform == .spotify && !spotifyAuth.isAuthenticated {
-                    spotifyLoginScreen
-                } else if isLoading {
+                if isLoading {
                     loadingView
                 } else if let msg = errorMessage {
                     ContentUnavailableView(
@@ -103,29 +121,27 @@ struct HomeView: View {
                     ContentUnavailableView(
                         "No Playlists Found",
                         systemImage: "music.note.list",
-                        description: Text("Add playlists to your \(selectedPlatform.rawValue) library to get started.")
+                        description: Text("Add playlists to your \(activePlatform.rawValue) library to get started.")
                     )
                 } else {
                     playlistList
                 }
-                    
-            }
-            .onAppear {
-                SpotifyAuthManager.shared.logout()  // temporary — remove after one run
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .animation(.easeInOut(duration: 0.25), value: activePlatform)
         }
         .background(Color(.systemGroupedBackground))
         .navigationTitle("Retune")
         .navigationBarTitleDisplayMode(.large)
-        .task { await loadCurrentPlatform() }
-        .onChange(of: selectedPlatform) {
-            Task { await loadCurrentPlatform() }
+        .task { await loadAll() }
+        .onChange(of: appState.connectedService) { _, _ in
+            Task { await loadAll() }
+        }
+        .onChange(of: appState.activeService) { _, _ in
+            Task { await loadForPlatform(activePlatform) }
         }
         .onChange(of: spotifyAuth.isAuthenticated) { _, isAuthed in
-            if isAuthed {
-                Task { await spotifyVM.load() }
-            }
+            if isAuthed { Task { await spotifyVM.load() } }
         }
         .navigationDestination(item: $selected) { selection in
             if selection.isSpotify {
@@ -134,67 +150,50 @@ struct HomeView: View {
                 SessionSetupView(playlist: selection.appleMusicPlaylist!)
             }
         }
-        .toolbar {
-            if selectedPlatform == .spotify && spotifyAuth.isAuthenticated {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("Sign Out") {
-                        spotifyAuth.logout()
-                        spotifyVM.reset()
-                    }
-                    .foregroundStyle(.red)
-                }
-            }
+    }
+
+    // MARK: - Loading helpers
+
+    /// On appear, pre-load both VMs if both are connected so switching is instant.
+    private func loadAll() async {
+        switch appState.connectedService {
+        case .appleMusic: await appleMusicVM.load()
+        case .spotify:    if spotifyAuth.isAuthenticated { await spotifyVM.load() }
+        case .both:
+            async let apple = appleMusicVM.load()
+            async let spot  = spotifyVM.load()
+            _ = await (apple, spot)
+        case .none: break
         }
     }
 
-    // MARK: - Platform loading
+    private func loadForPlatform(_ platform: MusicPlatform) async {
+        switch platform {
+        case .appleMusic: await appleMusicVM.load()
+        case .spotify:    await spotifyVM.load()
+        }
+    }
 
     private var isLoading: Bool {
-        selectedPlatform == .appleMusic ? appleMusicVM.isLoading : spotifyVM.isLoading
+        switch activePlatform {
+        case .appleMusic: return appleMusicVM.isLoading
+        case .spotify:    return spotifyVM.isLoading
+        }
     }
 
     private var errorMessage: String? {
-        selectedPlatform == .appleMusic ? appleMusicVM.errorMessage : spotifyVM.errorMessage
+        switch activePlatform {
+        case .appleMusic: return appleMusicVM.errorMessage
+        case .spotify:    return spotifyVM.errorMessage
+        }
     }
 
     private var currentPlaylists: [PlaylistSelection] {
-        switch selectedPlatform {
+        switch activePlatform {
         case .appleMusic:
             return appleMusicVM.playlists.map { PlaylistSelection(appleMusicPlaylist: $0) }
         case .spotify:
             return spotifyVM.playlists.map { PlaylistSelection(spotifyPlaylist: $0) }
-        }
-    }
-
-    private func loadCurrentPlatform() async {
-        switch selectedPlatform {
-        case .appleMusic:
-            await appleMusicVM.load()
-        case .spotify:
-            if spotifyAuth.isAuthenticated {
-                await spotifyVM.load()
-            }
-        }
-    }
-
-    // MARK: - Spotify Login Screen
-
-    private var spotifyLoginScreen: some View {
-        ScrollView {
-            VStack(spacing: 0) {
-                resumeBanner
-                    .padding(.horizontal, 16)
-                    .padding(.top, 8)
-
-                headerBanner
-                    .padding(.horizontal, 16)
-                    .padding(.top, 8)
-                    .padding(.bottom, 20)
-
-                spotifyLoginBanner
-                    .padding(.horizontal, 16)
-            }
-            .padding(.bottom, 24)
         }
     }
 
@@ -232,56 +231,6 @@ struct HomeView: View {
             .padding(.bottom, 24)
         }
         .background(Color(.systemGroupedBackground))
-    }
-
-    // MARK: - Spotify Login Banner
-
-    private var spotifyLoginBanner: some View {
-        VStack(spacing: 14) {
-            Image(systemName: "music.note.list")
-                .font(.system(size: 36))
-                .foregroundStyle(.green)
-
-            Text("Connect Spotify")
-                .font(.title3.weight(.semibold))
-
-            Text("Sign in to browse and retune your Spotify playlists.")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-
-            Button {
-                spotifyAuth.login()
-            } label: {
-                Text("Connect Spotify")
-                    .font(.headline)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 14)
-                    .background(Color.green)
-                    .foregroundStyle(.white)
-                    .clipShape(RoundedRectangle(cornerRadius: 14))
-            }
-            .disabled(spotifyAuth.isAuthenticating)
-
-            if spotifyAuth.isAuthenticating {
-                HStack(spacing: 8) {
-                    ProgressView().scaleEffect(0.85)
-                    Text("Connecting…")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                }
-            }
-
-            if let error = spotifyAuth.errorMessage {
-                Text(error)
-                    .font(.caption)
-                    .foregroundStyle(.red)
-                    .multilineTextAlignment(.center)
-            }
-        }
-        .padding(20)
-        .background(Color(.secondarySystemGroupedBackground))
-        .clipShape(RoundedRectangle(cornerRadius: 16))
     }
 
     // MARK: - Header Banner

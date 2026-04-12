@@ -15,8 +15,8 @@
 			<array>
 				<string>retune</string>
 			</array>
-			</dict>
-		</array>
+		</dict>
+	</array>
 	<key>NSAppleMusicUsageDescription</key>
 	<string>Retune uses your Apple Music library to load playlists and build retuned listening sessions.</string>
 </dict>
